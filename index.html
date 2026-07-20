@@ -154,6 +154,16 @@
 
 <div id="tabbar"></div>
 
+<div id="penBar" class="hidden" style="display:flex; align-items:center; gap:6px; padding:6px 10px; background:var(--panel); border-bottom:1px solid var(--border);">
+  <span class="small">Pen Tool: click to place points (always a closed shape).</span>
+  <button id="btnPenUndo">Undo Point</button>
+  <button id="btnPenClear">Clear</button>
+  <div class="spacer"></div>
+  <button id="btnPenFill">Fill Path</button>
+  <button id="btnPenStroke">Stroke Path</button>
+  <button id="btnPenMask">Use as Mask</button>
+</div>
+
 <div id="main">
 
   <div id="toolbar">
@@ -167,6 +177,7 @@
     <button data-tool="text" title="Text (T)">T</button>
     <button data-tool="wand" title="Magic erase background (W)">&#10024;</button>
     <button data-tool="clone" title="Clone Stamp / Healing Brush (K) — Alt+click to set source, then paint">&#9112;</button>
+    <button data-tool="pen" title="Pen Tool (P) — click to place points, then Fill / Stroke / Use as Mask">&#10002;</button>
   </div>
 
   <div id="canvasArea">
@@ -175,6 +186,7 @@
       <div id="checker"></div>
       <canvas id="stage"></canvas>
       <div id="cropOverlay"><div id="cropRect"></div></div>
+      <div id="penOverlay" style="position:absolute; inset:0; pointer-events:none; display:none;"></div>
     </div>
   </div>
 
@@ -414,6 +426,7 @@ function setActiveDocument(index){
   activeDocIndex = index;
   doc = documents[index] || null;
   resetCloneSource();
+  penPoints = [];
   if(doc){
     stage.width = doc.width; stage.height = doc.height;
     stageWrap.classList.remove('hidden'); dropHint.classList.add('hidden');
@@ -761,7 +774,9 @@ document.querySelectorAll('#toolbar button').forEach(btn=>{
     tool = btn.dataset.tool;
     document.getElementById('brushSection').classList.toggle('hidden', !['brush','eraser','rect','ellipse','line','clone'].includes(tool));
     document.getElementById('wandSection').classList.toggle('hidden', tool!=='wand');
+    document.getElementById('penBar').classList.toggle('hidden', tool!=='pen');
     cropOverlay.style.display = tool==='crop' ? 'block' : 'none';
+    drawPenOverlay();
     updateStatus();
   };
 });
@@ -777,6 +792,7 @@ function applyZoom(){
   stageWrap.style.width = (doc.width*z)+'px';
   stageWrap.style.height = (doc.height*z)+'px';
   document.getElementById('zoomLabel').textContent = Math.round(z*100)+'%';
+  drawPenOverlay();
 }
 function fitZoom(){
   if(!doc) return;
@@ -889,6 +905,11 @@ document.getElementById('btnAddTextLayer').onclick = addTextLayer;
 document.getElementById('btnAddMask').onclick = ()=>{ addMaskToActiveLayer(); updateMaskBanner(); };
 document.getElementById('btnDelMask').onclick = ()=>{ deleteMaskFromActiveLayer(); updateMaskBanner(); };
 document.getElementById('btnStopMaskEdit').onclick = ()=>{ editingMask=false; updateMaskBanner(); refreshLayerList(); };
+document.getElementById('btnPenUndo').onclick = ()=>{ penPoints.pop(); drawPenOverlay(); };
+document.getElementById('btnPenClear').onclick = clearPenPath;
+document.getElementById('btnPenFill').onclick = fillPenPath;
+document.getElementById('btnPenStroke').onclick = strokePenPath;
+document.getElementById('btnPenMask').onclick = ()=>{ penPathToMask(); updateMaskBanner(); };
 document.getElementById('btnDelLayer').onclick = ()=>{
   if(!doc||!doc.activeId) return;
   saveHistory();
@@ -1140,6 +1161,76 @@ function stampClone(l, destDoc){
   lc.restore();
 }
 
+// ---------- Pen Tool (vector paths) ----------
+// Points are stored in doc-space; the path is always treated as a closed polygon.
+let penPoints = [];
+function clearPenPath(){ penPoints = []; drawPenOverlay(); }
+function drawPenOverlay(){
+  const ov = document.getElementById('penOverlay');
+  if(!doc || tool!=='pen' || penPoints.length===0){ ov.style.display='none'; ov.innerHTML=''; return; }
+  ov.style.display='block';
+  const z = doc.zoom;
+  const ptsStr = penPoints.map(p=>`${p.x*z},${p.y*z}`).join(' ');
+  const dots = penPoints.map(p=>`<circle cx="${p.x*z}" cy="${p.y*z}" r="4" fill="#4f8cff" stroke="#fff" stroke-width="1"/>`).join('');
+  ov.innerHTML = `<svg width="100%" height="100%" style="position:absolute;inset:0;overflow:visible;">
+    <polygon points="${ptsStr}" fill="rgba(79,140,255,0.15)" stroke="#4f8cff" stroke-width="2" stroke-dasharray="4 3"/>
+    ${dots}
+  </svg>`;
+}
+function penPointsLocal(l){ return penPoints.map(p=>({x:p.x-l.x, y:p.y-l.y})); }
+function tracePenPath(ctx2d, pts){
+  ctx2d.beginPath();
+  ctx2d.moveTo(pts[0].x, pts[0].y);
+  for(let i=1;i<pts.length;i++) ctx2d.lineTo(pts[i].x, pts[i].y);
+  ctx2d.closePath();
+}
+function fillPenPath(){
+  if(penPoints.length<3){ alert('Add at least 3 points first.'); return; }
+  const l = ensureDrawableActiveLayer();
+  saveHistory();
+  const lc = l.canvas.getContext('2d');
+  lc.save();
+  lc.fillStyle = document.getElementById('brushColor').value;
+  lc.globalAlpha = (+document.getElementById('brushOpacity').value)/100;
+  tracePenPath(lc, penPointsLocal(l));
+  lc.fill();
+  lc.restore();
+  clearPenPath();
+  render(); refreshLayerList();
+}
+function strokePenPath(){
+  if(penPoints.length<2){ alert('Add at least 2 points first.'); return; }
+  const l = ensureDrawableActiveLayer();
+  saveHistory();
+  const lc = l.canvas.getContext('2d');
+  lc.save();
+  lc.strokeStyle = document.getElementById('brushColor').value;
+  lc.lineWidth = +document.getElementById('brushSize').value;
+  lc.globalAlpha = (+document.getElementById('brushOpacity').value)/100;
+  lc.lineJoin = 'round'; lc.lineCap = 'round';
+  tracePenPath(lc, penPointsLocal(l));
+  lc.stroke();
+  lc.restore();
+  clearPenPath();
+  render(); refreshLayerList();
+}
+function penPathToMask(){
+  if(penPoints.length<3){ alert('Add at least 3 points first.'); return; }
+  const l = activeLayer();
+  if(!l || l.type==='text'){ alert('Select an image or draw layer first (text layers can\'t have a mask).'); return; }
+  saveHistory();
+  const nw = l.canvas.width, nh = l.canvas.height;
+  const mc = makeCanvas(nw, nh);
+  const mctx = mc.getContext('2d');
+  mctx.fillStyle = '#fff';
+  tracePenPath(mctx, penPointsLocal(l));
+  mctx.fill();
+  l.mask = mc;
+  editingMask = true;
+  clearPenPath();
+  render(); refreshLayerList(); refreshPanels();
+}
+
 function canvasPointFromEvent(e){
   const rect = stage.getBoundingClientRect();
   const x = (e.clientX - rect.left) / doc.zoom;
@@ -1160,6 +1251,7 @@ stage.addEventListener('mousedown', (e)=>{
   if(!doc || spaceHeld) return;
   const pt = canvasPointFromEvent(e);
   if(tool==='crop'){ startCrop(pt); return; }
+  if(tool==='pen'){ penPoints.push(pt); drawPenOverlay(); return; }
   if(tool==='wand'){ doMagicErase(pt); return; }
   if(tool==='move'){ startMove(pt); return; }
   if(tool==='clone'){
@@ -1507,6 +1599,7 @@ document.getElementById('btnUndo').onclick = undo;
 document.getElementById('btnRedo').onclick = redo;
 window.addEventListener('keydown', (e)=>{
   const inInput = document.activeElement && ['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName);
+  if(e.key==='Escape' && tool==='pen' && !inInput){ clearPenPath(); return; }
   if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='z' && !e.shiftKey){ e.preventDefault(); undo(); return; }
   if((e.ctrlKey||e.metaKey) && (e.key.toLowerCase()==='y' || (e.key.toLowerCase()==='z'&&e.shiftKey))){ e.preventDefault(); redo(); return; }
   if((e.ctrlKey||e.metaKey) && !inInput && e.key.toLowerCase()==='c' && e.shiftKey){ e.preventDefault(); copyMerged(); return; }
@@ -1516,7 +1609,7 @@ window.addEventListener('keydown', (e)=>{
   if((e.ctrlKey||e.metaKey) && e.key==='-'){ e.preventDefault(); if(doc) setZoomAtCenter(doc.zoom/1.25); return; }
   if((e.ctrlKey||e.metaKey) && e.key==='0'){ e.preventDefault(); if(doc) fitZoom(); return; }
   if(!e.ctrlKey && !e.metaKey && !inInput){
-    const map = {v:'move', c:'crop', b:'brush', e:'eraser', r:'rect', o:'ellipse', l:'line', t:'text', w:'wand', k:'clone'};
+    const map = {v:'move', c:'crop', b:'brush', e:'eraser', r:'rect', o:'ellipse', l:'line', t:'text', w:'wand', k:'clone', p:'pen'};
     const k = e.key.toLowerCase();
     if(map[k]){
       const btn = document.querySelector(`#toolbar button[data-tool="${map[k]}"]`);
