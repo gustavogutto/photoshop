@@ -166,6 +166,7 @@
     <button data-tool="line" title="Line (L)">&#9585;</button>
     <button data-tool="text" title="Text (T)">T</button>
     <button data-tool="wand" title="Magic erase background (W)">&#10024;</button>
+    <button data-tool="clone" title="Clone Stamp / Healing Brush (K) — Alt+click to set source, then paint">&#9112;</button>
   </div>
 
   <div id="canvasArea">
@@ -409,6 +410,7 @@ function addDocument(d){
 function setActiveDocument(index){
   activeDocIndex = index;
   doc = documents[index] || null;
+  resetCloneSource();
   if(doc){
     stage.width = doc.width; stage.height = doc.height;
     stageWrap.classList.remove('hidden'); dropHint.classList.add('hidden');
@@ -674,7 +676,7 @@ function refreshLayerList(){
     thumb.className = 'thumb';
     if(l.type==='text'){ thumb.textContent='T'; thumb.style.display='flex'; thumb.style.alignItems='center'; thumb.style.justifyContent='center'; }
     else { thumb.src = l.canvas.toDataURL('image/png'); }
-    thumb.onclick = (e)=>{ e.stopPropagation(); doc.activeId=l.id; editingMask=false; refreshLayerList(); refreshPanels(); updateMaskBanner(); };
+    thumb.onclick = (e)=>{ e.stopPropagation(); doc.activeId=l.id; editingMask=false; resetCloneSource(); refreshLayerList(); refreshPanels(); updateMaskBanner(); };
 
     const eye = document.createElement('button'); eye.className='eye'; eye.textContent = l.visible?'👁':'—';
     eye.title = 'Toggle visibility';
@@ -687,7 +689,7 @@ function refreshLayerList(){
       const maskThumb = document.createElement('img'); maskThumb.className='maskThumb'+(editingMask && l.id===doc.activeId?' editing':'');
       maskThumb.title = 'Click to edit this layer\'s mask';
       maskThumb.src = l.mask.toDataURL('image/png');
-      maskThumb.onclick = (e)=>{ e.stopPropagation(); doc.activeId=l.id; editingMask=true; refreshLayerList(); refreshPanels(); updateMaskBanner(); };
+      maskThumb.onclick = (e)=>{ e.stopPropagation(); doc.activeId=l.id; editingMask=true; resetCloneSource(); refreshLayerList(); refreshPanels(); updateMaskBanner(); };
       item.appendChild(maskThumb);
     }
     item.appendChild(name); item.appendChild(eye);
@@ -698,7 +700,7 @@ function refreshLayerList(){
     down.onclick=(e)=>{e.stopPropagation(); moveLayer(l.id,-1);};
     item.appendChild(up); item.appendChild(down);
 
-    item.onclick = ()=>{ doc.activeId = l.id; editingMask=false; refreshLayerList(); refreshPanels(); updateMaskBanner(); };
+    item.onclick = ()=>{ doc.activeId = l.id; editingMask=false; resetCloneSource(); refreshLayerList(); refreshPanels(); updateMaskBanner(); };
     list.appendChild(item);
   }
 }
@@ -754,7 +756,7 @@ document.querySelectorAll('#toolbar button').forEach(btn=>{
     document.querySelectorAll('#toolbar button').forEach(b=>b.classList.remove('active'));
     btn.classList.add('active');
     tool = btn.dataset.tool;
-    document.getElementById('brushSection').classList.toggle('hidden', !['brush','eraser','rect','ellipse','line'].includes(tool));
+    document.getElementById('brushSection').classList.toggle('hidden', !['brush','eraser','rect','ellipse','line','clone'].includes(tool));
     document.getElementById('wandSection').classList.toggle('hidden', tool!=='wand');
     cropOverlay.style.display = tool==='crop' ? 'block' : 'none';
     updateStatus();
@@ -1117,6 +1119,24 @@ document.getElementById('textItalic').onchange = (e)=>{ const l=activeLayer(); i
 // ---------- Brush / Eraser / Shapes ----------
 let drawing = false, startPt = null, strokeCanvasBefore = null, maskStroke = false;
 
+// ---------- Clone Stamp / Healing Brush ----------
+// Alt+click sets the source point; painting copies pixels from (source + drag-offset) onto the destination.
+let cloneSourceDoc = null, cloneFirstDestDoc = null, cloneLastStampDoc = null, cloneStroke = false;
+function resetCloneSource(){ cloneSourceDoc = null; }
+function stampClone(l, destDoc){
+  const srcDoc = { x: cloneSourceDoc.x + (destDoc.x - cloneFirstDestDoc.x), y: cloneSourceDoc.y + (destDoc.y - cloneFirstDestDoc.y) };
+  const destLocal = { x: destDoc.x - l.x, y: destDoc.y - l.y };
+  const srcLocal = { x: srcDoc.x - l.x, y: srcDoc.y - l.y };
+  const size = +document.getElementById('brushSize').value;
+  const r = size/2;
+  const lc = l.canvas.getContext('2d');
+  lc.save();
+  lc.globalAlpha = (+document.getElementById('brushOpacity').value)/100;
+  lc.beginPath(); lc.arc(destLocal.x, destLocal.y, r, 0, Math.PI*2); lc.clip();
+  lc.drawImage(l.canvas, srcLocal.x-r, srcLocal.y-r, size, size, destLocal.x-r, destLocal.y-r, size, size);
+  lc.restore();
+}
+
 function canvasPointFromEvent(e){
   const rect = stage.getBoundingClientRect();
   const x = (e.clientX - rect.left) / doc.zoom;
@@ -1139,6 +1159,19 @@ stage.addEventListener('mousedown', (e)=>{
   if(tool==='crop'){ startCrop(pt); return; }
   if(tool==='wand'){ doMagicErase(pt); return; }
   if(tool==='move'){ startMove(pt); return; }
+  if(tool==='clone'){
+    const l = activeLayer();
+    if(!l || l.type==='text'){ alert('Select an image or draw layer first.'); return; }
+    if(e.altKey){ cloneSourceDoc = pt; return; }
+    if(!cloneSourceDoc){ alert('Alt+click on the canvas first to set a clone source, then paint.'); return; }
+    saveHistory();
+    cloneFirstDestDoc = pt;
+    cloneLastStampDoc = pt;
+    drawing = true; cloneStroke = true;
+    stampClone(l, pt);
+    render();
+    return;
+  }
   if(editingMask && ['brush','eraser'].includes(tool)){
     const l = activeLayer();
     if(!l || !l.mask) return;
@@ -1186,6 +1219,18 @@ window.addEventListener('mousemove', (e)=>{
   if(tool==='move' && moving){ doMove(pt); return; }
   if(!drawing) return;
   const l = activeLayer(); if(!l) return;
+  if(cloneStroke){
+    const step = Math.max(2, (+document.getElementById('brushSize').value)/4);
+    const dx = pt.x-cloneLastStampDoc.x, dy = pt.y-cloneLastStampDoc.y;
+    const dist = Math.hypot(dx,dy);
+    const steps = Math.floor(dist/step);
+    for(let i=1;i<=steps;i++){
+      stampClone(l, { x: cloneLastStampDoc.x + dx*(i/steps), y: cloneLastStampDoc.y + dy*(i/steps) });
+    }
+    if(steps>0) cloneLastStampDoc = pt;
+    render();
+    return;
+  }
   if(maskStroke){
     if(!l.mask) return;
     const mc = l.mask.getContext('2d');
@@ -1219,6 +1264,11 @@ window.addEventListener('mouseup', (e)=>{
   if(tool==='move' && moving){ moving=false; return; }
   if(!drawing) return;
   drawing = false;
+  if(cloneStroke){
+    cloneStroke = false;
+    refreshLayerList();
+    return;
+  }
   if(maskStroke){
     maskStroke = false;
     refreshLayerList();
@@ -1420,7 +1470,7 @@ window.addEventListener('keydown', (e)=>{
   if((e.ctrlKey||e.metaKey) && e.key==='-'){ e.preventDefault(); if(doc) setZoomAtCenter(doc.zoom/1.25); return; }
   if((e.ctrlKey||e.metaKey) && e.key==='0'){ e.preventDefault(); if(doc) fitZoom(); return; }
   if(!e.ctrlKey && !e.metaKey && !inInput){
-    const map = {v:'move', c:'crop', b:'brush', e:'eraser', r:'rect', o:'ellipse', l:'line', t:'text', w:'wand'};
+    const map = {v:'move', c:'crop', b:'brush', e:'eraser', r:'rect', o:'ellipse', l:'line', t:'text', w:'wand', k:'clone'};
     const k = e.key.toLowerCase();
     if(map[k]){
       const btn = document.querySelector(`#toolbar button[data-tool="${map[k]}"]`);
