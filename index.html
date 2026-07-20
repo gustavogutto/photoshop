@@ -98,10 +98,18 @@
   }
   .layerItem.selected{border-color:var(--accent); background:#32405c;}
   .layerItem .thumb{width:32px; height:32px; border:1px solid var(--border); background:#222; flex-shrink:0; object-fit:cover; border-radius:3px;}
+  .layerItem .maskThumb{width:32px; height:32px; border:1px solid var(--border); flex-shrink:0; object-fit:cover; border-radius:3px; cursor:pointer;}
+  .layerItem .maskThumb.editing{border-color:var(--accent); box-shadow:0 0 0 1px var(--accent);}
   .layerItem .lname{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .layerItem button{width:22px; height:22px; padding:0; font-size:11px;}
   .layerItem .eye{opacity:1;}
   .layerItem.hidden-layer{opacity:.4;}
+  #maskEditBanner{
+    display:none; align-items:center; gap:6px; padding:5px 7px; margin-bottom:8px;
+    background:#32405c; border:1px solid var(--accent); border-radius:4px; color:var(--text); font-size:11px;
+  }
+  #maskEditBanner.active{display:flex;}
+  #maskEditBanner button{margin-left:auto;}
 
   #dropHint{
     position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
@@ -178,6 +186,14 @@
         <button id="btnAddTextLayer">+ Text</button>
         <button id="btnDupLayer">Duplicate</button>
         <button id="btnDelLayer">Delete</button>
+      </div>
+      <div class="row" style="margin-bottom:8px; flex-wrap:wrap;">
+        <button id="btnAddMask" title="Add a mask to the active layer (image/draw layers only)">+ Add Mask</button>
+        <button id="btnDelMask" title="Remove the active layer's mask">Delete Mask</button>
+      </div>
+      <div id="maskEditBanner">
+        Editing mask: Brush = hide &middot; Eraser = reveal
+        <button id="btnStopMaskEdit">Done</button>
       </div>
       <div id="layerList"></div>
       <div class="row" style="margin-top:8px;">
@@ -335,7 +351,39 @@ let clipboard = null; // {kind:'image'|'text', ...}
 let tool = 'move';
 let uidCounter = 1;
 let docIdCounter = 1;
+let editingMask = false; // true = brush/eraser strokes on the active layer's mask instead of its pixels
 function uid(){ return 'L'+(uidCounter++); }
+
+// ---------- Layer masks ----------
+// A mask is a same-size canvas whose ALPHA channel encodes visibility (opaque = fully visible).
+// destination-out strokes reduce alpha (hide); source-over white strokes restore it (reveal).
+function makeFullMask(w,h){
+  const c = makeCanvas(w,h);
+  const cc = c.getContext('2d');
+  cc.fillStyle = '#fff';
+  cc.fillRect(0,0,w,h);
+  return c;
+}
+function addMaskToActiveLayer(){
+  const l = activeLayer();
+  if(!l || l.type==='text'){ alert('Select an image or draw layer first (text layers can\'t have a mask).'); return; }
+  if(l.mask) return;
+  saveHistory();
+  l.mask = makeFullMask(l.w, l.h);
+  editingMask = true;
+  refreshLayerList(); render();
+}
+function deleteMaskFromActiveLayer(){
+  const l = activeLayer();
+  if(!l || !l.mask) return;
+  saveHistory();
+  l.mask = null;
+  editingMask = false;
+  refreshLayerList(); render();
+}
+function updateMaskBanner(){
+  document.getElementById('maskEditBanner').classList.toggle('active', editingMask && !!(activeLayer() && activeLayer().mask));
+}
 
 function defaultAdj(){
   return {brightness:100, contrast:100, saturation:100, hue:0, blur:0, grayscale:false, sepia:false, invert:false};
@@ -512,7 +560,18 @@ function render(){
       const cx = layer.x + layer.w/2, cy = layer.y + layer.h/2;
       ctx.translate(cx, cy);
       if(layer.rotation) ctx.rotate(layer.rotation*Math.PI/180);
-      ctx.drawImage(layer.canvas, -layer.w/2, -layer.h/2, layer.w, layer.h);
+      let src = layer.canvas;
+      if(layer.mask){
+        // Draw both scaled to the layer's current w/h (not native pixel size) so this
+        // stays correct after Resize Document, which only rescales w/h metadata.
+        const tmp = makeCanvas(layer.w, layer.h);
+        const tctx = tmp.getContext('2d');
+        tctx.drawImage(layer.canvas,0,0,layer.w,layer.h);
+        tctx.globalCompositeOperation = 'destination-in';
+        tctx.drawImage(layer.mask,0,0,layer.w,layer.h);
+        src = tmp;
+      }
+      ctx.drawImage(src, -layer.w/2, -layer.h/2, layer.w, layer.h);
     }
     ctx.restore();
   }
@@ -534,38 +593,37 @@ function serializeDoc(){
       const base = {id:l.id, type:l.type, name:l.name, visible:l.visible, opacity:l.opacity,
         blend:l.blend, x:l.x, y:l.y, rotation:l.rotation, adj: JSON.parse(JSON.stringify(l.adj))};
       if(l.type==='text'){ base.text = JSON.parse(JSON.stringify(l.text)); }
-      else { base.w=l.w; base.h=l.h; base.dataURL = l.canvas.toDataURL('image/png'); }
+      else {
+        base.w=l.w; base.h=l.h; base.dataURL = l.canvas.toDataURL('image/png');
+        if(l.mask) base.maskDataURL = l.mask.toDataURL('image/png');
+      }
       return base;
     })
   };
 }
-function deserializeDoc(snap){
-  return new Promise((resolve)=>{
-    const layers = [];
-    let pending = snap.layers.filter(l=>l.type!=='text').length;
-    if(pending===0) finish();
-    snap.layers.forEach(ls=>{
-      if(ls.type==='text'){
-        layers.push({id:ls.id, type:'text', name:ls.name, visible:ls.visible, opacity:ls.opacity,
-          blend:ls.blend, x:ls.x, y:ls.y, rotation:ls.rotation, adj:ls.adj, text:ls.text});
-      } else {
-        const img = new Image();
-        img.onload = ()=>{
-          const c = makeCanvas(ls.w, ls.h);
-          c.getContext('2d').drawImage(img,0,0);
-          layers.push({id:ls.id, type:ls.type, name:ls.name, visible:ls.visible, opacity:ls.opacity,
-            blend:ls.blend, x:ls.x, y:ls.y, w:ls.w, h:ls.h, rotation:ls.rotation, adj:ls.adj, canvas:c});
-          pending--; if(pending===0) finish();
-        };
-        img.src = ls.dataURL;
-      }
-    });
-    function finish(){
-      const order = snap.layers.map(l=>l.id);
-      layers.sort((a,b)=> order.indexOf(a.id)-order.indexOf(b.id));
-      resolve({width:snap.width, height:snap.height, activeId:snap.activeId, layers});
+function loadImg(src){
+  return new Promise((resolve)=>{ const img = new Image(); img.onload = ()=>resolve(img); img.src = src; });
+}
+async function deserializeDoc(snap){
+  const layers = await Promise.all(snap.layers.map(async (ls)=>{
+    if(ls.type==='text'){
+      return {id:ls.id, type:'text', name:ls.name, visible:ls.visible, opacity:ls.opacity,
+        blend:ls.blend, x:ls.x, y:ls.y, rotation:ls.rotation, adj:ls.adj, text:ls.text};
     }
-  });
+    const img = await loadImg(ls.dataURL);
+    const c = makeCanvas(ls.w, ls.h);
+    c.getContext('2d').drawImage(img,0,0);
+    const layer = {id:ls.id, type:ls.type, name:ls.name, visible:ls.visible, opacity:ls.opacity,
+      blend:ls.blend, x:ls.x, y:ls.y, w:ls.w, h:ls.h, rotation:ls.rotation, adj:ls.adj, canvas:c, mask:null};
+    if(ls.maskDataURL){
+      const mimg = await loadImg(ls.maskDataURL);
+      const mc = makeCanvas(mimg.naturalWidth, mimg.naturalHeight);
+      mc.getContext('2d').drawImage(mimg,0,0);
+      layer.mask = mc;
+    }
+    return layer;
+  }));
+  return {width:snap.width, height:snap.height, activeId:snap.activeId, layers};
 }
 
 const MAX_HISTORY = 25;
@@ -616,6 +674,7 @@ function refreshLayerList(){
     thumb.className = 'thumb';
     if(l.type==='text'){ thumb.textContent='T'; thumb.style.display='flex'; thumb.style.alignItems='center'; thumb.style.justifyContent='center'; }
     else { thumb.src = l.canvas.toDataURL('image/png'); }
+    thumb.onclick = (e)=>{ e.stopPropagation(); doc.activeId=l.id; editingMask=false; refreshLayerList(); refreshPanels(); updateMaskBanner(); };
 
     const eye = document.createElement('button'); eye.className='eye'; eye.textContent = l.visible?'👁':'—';
     eye.title = 'Toggle visibility';
@@ -623,7 +682,15 @@ function refreshLayerList(){
 
     const name = document.createElement('div'); name.className='lname'; name.textContent = l.name;
 
-    item.appendChild(thumb); item.appendChild(name); item.appendChild(eye);
+    item.appendChild(thumb);
+    if(l.mask){
+      const maskThumb = document.createElement('img'); maskThumb.className='maskThumb'+(editingMask && l.id===doc.activeId?' editing':'');
+      maskThumb.title = 'Click to edit this layer\'s mask';
+      maskThumb.src = l.mask.toDataURL('image/png');
+      maskThumb.onclick = (e)=>{ e.stopPropagation(); doc.activeId=l.id; editingMask=true; refreshLayerList(); refreshPanels(); updateMaskBanner(); };
+      item.appendChild(maskThumb);
+    }
+    item.appendChild(name); item.appendChild(eye);
 
     const up = document.createElement('button'); up.textContent='↑'; up.title='Move up';
     up.onclick=(e)=>{e.stopPropagation(); moveLayer(l.id,1);};
@@ -631,7 +698,7 @@ function refreshLayerList(){
     down.onclick=(e)=>{e.stopPropagation(); moveLayer(l.id,-1);};
     item.appendChild(up); item.appendChild(down);
 
-    item.onclick = ()=>{ doc.activeId = l.id; refreshLayerList(); refreshPanels(); };
+    item.onclick = ()=>{ doc.activeId = l.id; editingMask=false; refreshLayerList(); refreshPanels(); updateMaskBanner(); };
     list.appendChild(item);
   }
 }
@@ -646,6 +713,8 @@ function moveLayer(id, dir){
 
 function refreshPanels(){
   const l = activeLayer();
+  if(!l || !l.mask) editingMask = false;
+  updateMaskBanner();
   document.getElementById('layerOpacity').value = l? l.opacity : 100;
   document.getElementById('layerBlend').value = l? l.blend : 'source-over';
   document.getElementById('layerRotation').value = l? (l.rotation||0) : 0;
@@ -812,6 +881,9 @@ document.getElementById('btnNew').onclick = ()=>{
 // ---------- Layer panel controls ----------
 document.getElementById('btnAddDrawLayer').onclick = addDrawLayer;
 document.getElementById('btnAddTextLayer').onclick = addTextLayer;
+document.getElementById('btnAddMask').onclick = ()=>{ addMaskToActiveLayer(); updateMaskBanner(); };
+document.getElementById('btnDelMask').onclick = ()=>{ deleteMaskFromActiveLayer(); updateMaskBanner(); };
+document.getElementById('btnStopMaskEdit').onclick = ()=>{ editingMask=false; updateMaskBanner(); refreshLayerList(); };
 document.getElementById('btnDelLayer').onclick = ()=>{
   if(!doc||!doc.activeId) return;
   saveHistory();
@@ -822,11 +894,15 @@ document.getElementById('btnDelLayer').onclick = ()=>{
 document.getElementById('btnDupLayer').onclick = ()=>{
   const l = activeLayer(); if(!l) return;
   saveHistory();
-  const copy = JSON.parse(JSON.stringify(l, (k,v)=> k==='canvas'? undefined : v));
+  const copy = JSON.parse(JSON.stringify(l, (k,v)=> (k==='canvas'||k==='mask')? undefined : v));
   copy.id = uid(); copy.name = l.name+' copy';
   if(l.type!=='text'){
     const c = makeCanvas(l.w,l.h); c.getContext('2d').drawImage(l.canvas,0,0);
     copy.canvas = c;
+    if(l.mask){
+      const mc = makeCanvas(l.mask.width, l.mask.height); mc.getContext('2d').drawImage(l.mask,0,0);
+      copy.mask = mc;
+    }
   }
   doc.layers.push(copy); doc.activeId = copy.id;
   refreshLayerList(); refreshPanels(); render();
@@ -892,19 +968,26 @@ document.getElementById('layerRotation').onpointerdown = ()=>{ if(doc) saveHisto
 document.getElementById('layerRotation').oninput = (e)=>{
   const l=activeLayer(); if(l){ l.rotation=+e.target.value; document.getElementById('rotVal').textContent=l.rotation+'°'; render(); }
 };
+function flipCanvas(src, horizontal){
+  const w=src.width, h=src.height;
+  const c = makeCanvas(w,h); const cc=c.getContext('2d');
+  if(horizontal){ cc.translate(w,0); cc.scale(-1,1); } else { cc.translate(0,h); cc.scale(1,-1); }
+  cc.drawImage(src,0,0);
+  return c;
+}
 document.getElementById('btnFlipH').onclick = ()=>{
   const l=activeLayer(); if(!l||l.type==='text') return;
   saveHistory();
-  const c = makeCanvas(l.w,l.h); const cc=c.getContext('2d');
-  cc.translate(l.w,0); cc.scale(-1,1); cc.drawImage(l.canvas,0,0);
-  l.canvas = c; render(); refreshLayerList();
+  l.canvas = flipCanvas(l.canvas, true);
+  if(l.mask) l.mask = flipCanvas(l.mask, true);
+  render(); refreshLayerList();
 };
 document.getElementById('btnFlipV').onclick = ()=>{
   const l=activeLayer(); if(!l||l.type==='text') return;
   saveHistory();
-  const c = makeCanvas(l.w,l.h); const cc=c.getContext('2d');
-  cc.translate(0,l.h); cc.scale(1,-1); cc.drawImage(l.canvas,0,0);
-  l.canvas = c; render(); refreshLayerList();
+  l.canvas = flipCanvas(l.canvas, false);
+  if(l.mask) l.mask = flipCanvas(l.mask, false);
+  render(); refreshLayerList();
 };
 document.getElementById('btnRotateCanvasCW').onclick = ()=> rotateCanvas90(true);
 document.getElementById('btnRotateCanvasCCW').onclick = ()=> rotateCanvas90(false);
@@ -925,6 +1008,14 @@ function rotateCanvas90(cw){
     cc.translate(c.width/2, c.height/2);
     cc.rotate((cw?90:-90)*Math.PI/180);
     cc.drawImage(l.canvas, -l.w/2, -l.h/2, l.w, l.h);
+    if(l.mask){
+      const mc = makeCanvas(l.h, l.w);
+      const mcc = mc.getContext('2d');
+      mcc.translate(mc.width/2, mc.height/2);
+      mcc.rotate((cw?90:-90)*Math.PI/180);
+      mcc.drawImage(l.mask, -l.w/2, -l.h/2, l.w, l.h);
+      l.mask = mc;
+    }
     const ow=l.w, oh=l.h;
     l.canvas = c; l.w = oh; l.h = ow;
     const ocx = l.x+ow/2, ocy = l.y+oh/2;
@@ -1024,7 +1115,7 @@ document.getElementById('textBold').onchange = (e)=>{ const l=activeLayer(); if(
 document.getElementById('textItalic').onchange = (e)=>{ const l=activeLayer(); if(l&&l.type==='text'){ saveHistory(); l.text.italic=e.target.checked; render(); } };
 
 // ---------- Brush / Eraser / Shapes ----------
-let drawing = false, startPt = null, strokeCanvasBefore = null;
+let drawing = false, startPt = null, strokeCanvasBefore = null, maskStroke = false;
 
 function canvasPointFromEvent(e){
   const rect = stage.getBoundingClientRect();
@@ -1048,9 +1139,26 @@ stage.addEventListener('mousedown', (e)=>{
   if(tool==='crop'){ startCrop(pt); return; }
   if(tool==='wand'){ doMagicErase(pt); return; }
   if(tool==='move'){ startMove(pt); return; }
+  if(editingMask && ['brush','eraser'].includes(tool)){
+    const l = activeLayer();
+    if(!l || !l.mask) return;
+    saveHistory();
+    maskStroke = true;
+    drawing = true;
+    const lc = l.mask.getContext('2d');
+    lc.lineCap='round'; lc.lineJoin='round';
+    // Brush hides (subtracts mask alpha); Eraser reveals (restores mask alpha with opaque white).
+    lc.globalCompositeOperation = tool==='eraser' ? 'source-over' : 'destination-out';
+    lc.strokeStyle = '#ffffff';
+    lc.globalAlpha = (+document.getElementById('brushOpacity').value)/100;
+    lc.lineWidth = +document.getElementById('brushSize').value;
+    lc.beginPath(); lc.moveTo(pt.x - l.x, pt.y - l.y);
+    return;
+  }
   if(['brush','eraser'].includes(tool)){
     const l = ensureDrawableActiveLayer();
     saveHistory();
+    maskStroke = false;
     strokeCanvasBefore = l.canvas.toDataURL();
     drawing = true;
     const lc = l.canvas.getContext('2d');
@@ -1077,7 +1185,16 @@ window.addEventListener('mousemove', (e)=>{
   if(tool==='crop' && cropDragging){ updateCrop(pt); return; }
   if(tool==='move' && moving){ doMove(pt); return; }
   if(!drawing) return;
-  const l = activeLayer(); if(!l||l.type!=='draw') return;
+  const l = activeLayer(); if(!l) return;
+  if(maskStroke){
+    if(!l.mask) return;
+    const mc = l.mask.getContext('2d');
+    mc.lineTo(pt.x - l.x, pt.y - l.y);
+    mc.stroke();
+    render();
+    return;
+  }
+  if(l.type!=='draw') return;
   const lc = l.canvas.getContext('2d');
 
   if(['brush','eraser'].includes(tool)){
@@ -1102,6 +1219,11 @@ window.addEventListener('mouseup', (e)=>{
   if(tool==='move' && moving){ moving=false; return; }
   if(!drawing) return;
   drawing = false;
+  if(maskStroke){
+    maskStroke = false;
+    refreshLayerList();
+    return;
+  }
   if(['rect','ellipse','line'].includes(tool)){
     const pt = canvasPointFromEvent(e);
     const l = activeLayer();
@@ -1199,6 +1321,11 @@ function applyCrop(cx,cy,cw,ch){
     if(l.type==='text'){ l.x -= cx; l.y -= cy; return; }
     const c = makeCanvas(cw,ch);
     c.getContext('2d').drawImage(l.canvas, l.x-cx, l.y-cy);
+    if(l.mask){
+      const mc = makeCanvas(cw,ch);
+      mc.getContext('2d').drawImage(l.mask, l.x-cx, l.y-cy);
+      l.mask = mc;
+    }
     l.canvas = c; l.x=0; l.y=0; l.w=cw; l.h=ch;
   });
   doc.width=cw; doc.height=ch; stage.width=cw; stage.height=ch;
