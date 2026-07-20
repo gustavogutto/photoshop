@@ -116,7 +116,7 @@
     color:var(--muted); font-size:15px; text-align:center; pointer-events:none; padding:20px;
   }
   .hidden{display:none !important;}
-  #fileInput, #importInput, #projInput{display:none;}
+  #fileInput, #importInput, #projInput, #folderInput{display:none;}
   ::-webkit-scrollbar{width:10px; height:10px;}
   ::-webkit-scrollbar-thumb{background:#444; border-radius:5px;}
   #statusbar{
@@ -133,6 +133,7 @@
   <button id="btnNew" title="New blank document (opens a new tab)">New</button>
   <button id="btnOpen" title="First image starts a new canvas; if a canvas is already open, images add as layers on top of it">Open Image</button>
   <button id="btnImportLayer" title="Add an image as a new layer on top of the CURRENT canvas">+ Add Layer From File</button>
+  <button id="btnLoadFolder" title="Pick a folder of frames named like action_DIR_00.png — auto-arranges them into one sprite sheet, one row per action+direction">Build Sheet From Folder</button>
   <button id="btnSaveProj" title="Save this document (.json) — lets you pick the folder in Chrome/Edge">Save Project</button>
   <button id="btnLoadProj" title="Load a saved document as a new tab">Load Project</button>
   <div class="sep"></div>
@@ -150,6 +151,7 @@
   <input type="file" id="fileInput" accept="image/*" multiple>
   <input type="file" id="importInput" accept="image/*" multiple>
   <input type="file" id="projInput" accept="application/json,.json">
+  <input type="file" id="folderInput" webkitdirectory multiple>
 </div>
 
 <div id="tabbar"></div>
@@ -940,6 +942,74 @@ document.getElementById('importInput').onchange = async (e)=>{
   }
   e.target.value='';
 };
+
+// "Build Sheet From Folder" — combines a folder of frame images named like
+// "walk_E_00.png" (action_DIRECTION_frameNumber) into one flattened sprite sheet:
+// one row per action+direction, columns = frame index. Built for sprite-frame exports
+// from game art pipelines, where each direction's frames need to land on their own row.
+document.getElementById('btnLoadFolder').onclick = ()=> document.getElementById('folderInput').click();
+document.getElementById('folderInput').onchange = async (e)=>{
+  const files = Array.from(e.target.files).filter(f=>f.type.startsWith('image/'));
+  e.target.value = '';
+  if(files.length===0){ alert('No image files found in that folder.'); return; }
+  await buildSpriteSheetFromFiles(files);
+};
+async function buildSpriteSheetFromFiles(files){
+  const pattern = /^(.+)_([A-Za-z]{1,2})_(\d+)\.(png|jpe?g)$/i;
+  const groups = new Map(); // "action|DIR" -> [{frame, file}]
+  const groupOrder = [];
+  const unmatched = [];
+  for(const file of files){
+    const m = file.name.match(pattern);
+    if(!m){ unmatched.push(file.name); continue; }
+    const action = m[1], dir = m[2].toUpperCase(), frame = parseInt(m[3],10);
+    const key = action+'|'+dir;
+    if(!groups.has(key)){ groups.set(key, []); groupOrder.push(key); }
+    groups.get(key).push({frame, file});
+  }
+  if(groupOrder.length===0){ alert('Couldn\'t recognize any files. Expected names like "walk_E_00.png" (action_DIRECTION_frame).'); return; }
+  groupOrder.sort((a,b)=>{
+    const [aAction,aDir] = a.split('|'), [bAction,bDir] = b.split('|');
+    if(aAction!==bAction) return aAction<bAction? -1:1;
+    return aDir<bDir? -1:1;
+  });
+  for(const key of groupOrder) groups.get(key).sort((a,b)=>a.frame-b.frame);
+
+  const maxCols = Math.max(...groupOrder.map(k=>groups.get(k).length));
+  const numRows = groupOrder.length;
+  const btn = document.getElementById('btnLoadFolder');
+  const orig = btn.textContent;
+  btn.disabled = true;
+
+  const firstImg = await readImage(groups.get(groupOrder[0])[0].file);
+  const cellW = firstImg.naturalWidth, cellH = firstImg.naturalHeight;
+
+  const d = createDocObject(maxCols*cellW, numRows*cellH, 'Sprite Sheet');
+  const sheetCanvas = makeCanvas(d.width, d.height);
+  const sctx = sheetCanvas.getContext('2d');
+
+  let loaded = 0;
+  for(let row=0; row<groupOrder.length; row++){
+    const frames = groups.get(groupOrder[row]);
+    for(let col=0; col<frames.length; col++){
+      const img = (row===0 && col===0) ? firstImg : await readImage(frames[col].file);
+      sctx.drawImage(img, col*cellW, row*cellH, cellW, cellH);
+      loaded++;
+      btn.textContent = `Loading ${loaded}/${files.length}…`;
+    }
+  }
+  btn.textContent = orig; btn.disabled = false;
+
+  const layer = { id:uid(), type:'image', name:'Sprite Sheet', visible:true, opacity:100, blend:'source-over',
+    x:0, y:0, w:d.width, h:d.height, rotation:0, canvas:sheetCanvas, adj: defaultAdj() };
+  d.layers.push(layer); d.activeId = layer.id;
+  addDocument(d);
+
+  let msg = `Built sprite sheet: ${numRows} rows (one per action+direction), up to ${maxCols} columns, `+
+    `${cellW}×${cellH} per frame → ${d.width}×${d.height}px total.`;
+  if(unmatched.length) msg += `\n\n${unmatched.length} file(s) didn't match the expected pattern and were skipped.`;
+  alert(msg);
+}
 
 document.getElementById('btnNew').onclick = ()=>{
   const w = parseInt(prompt('Document width (px)','1200'),10);
