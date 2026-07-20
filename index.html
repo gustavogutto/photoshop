@@ -164,6 +164,14 @@
   <button id="btnPenMask">Use as Mask</button>
 </div>
 
+<div id="selectBar" class="hidden" style="display:flex; align-items:center; gap:6px; padding:6px 10px; background:var(--panel); border-bottom:1px solid var(--border);">
+  <span class="small">Marquee Select: drag a rectangle on the canvas.</span>
+  <div class="spacer"></div>
+  <button id="btnSelCut">Cut Selection</button>
+  <button id="btnSelCopy">Copy Selection</button>
+  <button id="btnSelClear">Clear Selection</button>
+</div>
+
 <div id="main">
 
   <div id="toolbar">
@@ -178,6 +186,7 @@
     <button data-tool="wand" title="Magic erase background (W)">&#10024;</button>
     <button data-tool="clone" title="Clone Stamp / Healing Brush (K) — Alt+click to set source, then paint">&#9112;</button>
     <button data-tool="pen" title="Pen Tool (P) — click to place points, then Fill / Stroke / Use as Mask">&#10002;</button>
+    <button data-tool="select" title="Marquee Select (M) — drag a rectangle, then Cut/Copy just that region">&#11034;</button>
   </div>
 
   <div id="canvasArea">
@@ -188,6 +197,9 @@
       <div id="cropOverlay"><div id="cropRect"></div></div>
       <div id="penOverlay" style="position:absolute; inset:0; pointer-events:none; display:none;"></div>
       <div id="transformOverlay" style="position:absolute; inset:0; pointer-events:none; display:none;"></div>
+      <div id="selectOverlay" style="position:absolute; inset:0; pointer-events:none; display:none;">
+        <div id="selectRect" style="position:absolute; border:1.5px dashed #4f8cff; box-shadow:0 0 0 2000px rgba(0,0,0,.35);"></div>
+      </div>
     </div>
   </div>
 
@@ -445,6 +457,7 @@ function setActiveDocument(index){
   doc = documents[index] || null;
   resetCloneSource();
   penPoints = [];
+  selRect = null; selDragging = false;
   if(doc){
     stage.width = doc.width; stage.height = doc.height;
     stageWrap.classList.remove('hidden'); dropHint.classList.add('hidden');
@@ -805,9 +818,11 @@ document.querySelectorAll('#toolbar button').forEach(btn=>{
     document.getElementById('brushSection').classList.toggle('hidden', !['brush','eraser','rect','ellipse','line','clone'].includes(tool));
     document.getElementById('wandSection').classList.toggle('hidden', tool!=='wand');
     document.getElementById('penBar').classList.toggle('hidden', tool!=='pen');
+    document.getElementById('selectBar').classList.toggle('hidden', tool!=='select');
     cropOverlay.style.display = tool==='crop' ? 'block' : 'none';
     drawPenOverlay();
     updateTransformOverlay();
+    drawSelectRect();
     updateStatus();
   };
 });
@@ -825,6 +840,7 @@ function applyZoom(){
   document.getElementById('zoomLabel').textContent = Math.round(z*100)+'%';
   drawPenOverlay();
   updateTransformOverlay();
+  drawSelectRect();
 }
 function fitZoom(){
   if(!doc) return;
@@ -942,6 +958,9 @@ document.getElementById('btnPenClear').onclick = clearPenPath;
 document.getElementById('btnPenFill').onclick = fillPenPath;
 document.getElementById('btnPenStroke').onclick = strokePenPath;
 document.getElementById('btnPenMask').onclick = ()=>{ penPathToMask(); updateMaskBanner(); };
+document.getElementById('btnSelCut').onclick = cutSelection;
+document.getElementById('btnSelCopy').onclick = copySelection;
+document.getElementById('btnSelClear').onclick = clearSelection;
 document.getElementById('btnDelLayer').onclick = ()=>{
   if(!doc||!doc.activeId) return;
   saveHistory();
@@ -1348,6 +1367,54 @@ function penPathToMask(){
   render(); refreshLayerList(); refreshPanels();
 }
 
+// ---------- Marquee Select (Cut/Copy just a region, not the whole layer) ----------
+let selRect = null; // {x,y,w,h} in doc-space, committed selection
+let selDragging = false, selStart = null, selCurrent = null;
+function drawSelectRect(){
+  const ov = document.getElementById('selectOverlay');
+  const r = document.getElementById('selectRect');
+  if(!doc || tool!=='select'){ ov.style.display='none'; return; }
+  const pts = selDragging ? {a:selStart,b:selCurrent} : (selRect? {a:{x:selRect.x,y:selRect.y}, b:{x:selRect.x+selRect.w,y:selRect.y+selRect.h}} : null);
+  if(!pts){ ov.style.display='none'; return; }
+  ov.style.display='block';
+  const z = doc.zoom;
+  const x0=Math.min(pts.a.x,pts.b.x), y0=Math.min(pts.a.y,pts.b.y);
+  const x1=Math.max(pts.a.x,pts.b.x), y1=Math.max(pts.a.y,pts.b.y);
+  r.style.left=(x0*z)+'px'; r.style.top=(y0*z)+'px';
+  r.style.width=((x1-x0)*z)+'px'; r.style.height=((y1-y0)*z)+'px';
+}
+function endSelectDrag(){
+  selDragging = false;
+  const x0=Math.min(selStart.x,selCurrent.x), y0=Math.min(selStart.y,selCurrent.y);
+  const x1=Math.max(selStart.x,selCurrent.x), y1=Math.max(selStart.y,selCurrent.y);
+  selRect = (x1-x0<3 || y1-y0<3) ? null : {x:x0, y:y0, w:x1-x0, h:y1-y0};
+  drawSelectRect();
+}
+function clearSelection(){ selRect=null; selDragging=false; drawSelectRect(); }
+function copySelection(){
+  if(!selRect){ alert('Drag a selection rectangle on the canvas first.'); return; }
+  const l = activeLayer();
+  if(!l || l.type==='text'){ alert('Select an image or draw layer first.'); return; }
+  const lx = Math.round(selRect.x - l.x), ly = Math.round(selRect.y - l.y);
+  const w = Math.round(selRect.w), h = Math.round(selRect.h);
+  const c = makeCanvas(w,h);
+  c.getContext('2d').drawImage(l.canvas, lx, ly, w, h, 0, 0, w, h);
+  clipboard = { kind:'image', name: l.name+' (selection)', w, h, srcType: l.type,
+    dataURL: c.toDataURL('image/png'), adj: defaultAdj(), rotation:0 };
+  updateClipboardStatus();
+}
+function cutSelection(){
+  if(!selRect){ alert('Drag a selection rectangle on the canvas first.'); return; }
+  const l = activeLayer();
+  if(!l || l.type==='text'){ alert('Select an image or draw layer first.'); return; }
+  copySelection();
+  saveHistory();
+  const lx = Math.round(selRect.x - l.x), ly = Math.round(selRect.y - l.y);
+  const w = Math.round(selRect.w), h = Math.round(selRect.h);
+  l.canvas.getContext('2d').clearRect(lx, ly, w, h);
+  render(); refreshLayerList();
+}
+
 function canvasPointFromEvent(e){
   const rect = stage.getBoundingClientRect();
   const x = (e.clientX - rect.left) / doc.zoom;
@@ -1369,6 +1436,7 @@ stage.addEventListener('mousedown', (e)=>{
   const pt = canvasPointFromEvent(e);
   if(tool==='crop'){ startCrop(pt); return; }
   if(tool==='pen'){ penPoints.push(pt); drawPenOverlay(); return; }
+  if(tool==='select'){ selDragging=true; selStart=pt; selCurrent=pt; selRect=null; drawSelectRect(); return; }
   if(tool==='wand'){ doMagicErase(pt); return; }
   if(tool==='move'){ startMove(pt); return; }
   if(tool==='clone'){
@@ -1428,6 +1496,7 @@ window.addEventListener('mousemove', (e)=>{
   if(!doc) return;
   const pt = canvasPointFromEvent(e);
   if(tool==='crop' && cropDragging){ updateCrop(pt); return; }
+  if(tool==='select' && selDragging){ selCurrent=pt; drawSelectRect(); return; }
   if(tool==='move' && moving){ doMove(pt); return; }
   if(!drawing) return;
   const l = activeLayer(); if(!l) return;
@@ -1473,6 +1542,7 @@ window.addEventListener('mousemove', (e)=>{
 window.addEventListener('mouseup', (e)=>{
   if(!doc) return;
   if(tool==='crop' && cropDragging){ endCropDrag(); return; }
+  if(tool==='select' && selDragging){ endSelectDrag(); return; }
   if(tool==='move' && moving){ moving=false; return; }
   if(!drawing) return;
   drawing = false;
@@ -1720,6 +1790,7 @@ document.getElementById('btnRedo').onclick = redo;
 window.addEventListener('keydown', (e)=>{
   const inInput = document.activeElement && ['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName);
   if(e.key==='Escape' && tool==='pen' && !inInput){ clearPenPath(); return; }
+  if(e.key==='Escape' && tool==='select' && !inInput){ clearSelection(); return; }
   if((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='z' && !e.shiftKey){ e.preventDefault(); undo(); return; }
   if((e.ctrlKey||e.metaKey) && (e.key.toLowerCase()==='y' || (e.key.toLowerCase()==='z'&&e.shiftKey))){ e.preventDefault(); redo(); return; }
   if((e.ctrlKey||e.metaKey) && !inInput && e.key.toLowerCase()==='c' && e.shiftKey){ e.preventDefault(); copyMerged(); return; }
@@ -1729,7 +1800,7 @@ window.addEventListener('keydown', (e)=>{
   if((e.ctrlKey||e.metaKey) && e.key==='-'){ e.preventDefault(); if(doc) setZoomAtCenter(doc.zoom/1.25); return; }
   if((e.ctrlKey||e.metaKey) && e.key==='0'){ e.preventDefault(); if(doc) fitZoom(); return; }
   if(!e.ctrlKey && !e.metaKey && !inInput){
-    const map = {v:'move', c:'crop', b:'brush', e:'eraser', r:'rect', o:'ellipse', l:'line', t:'text', w:'wand', k:'clone', p:'pen'};
+    const map = {v:'move', c:'crop', b:'brush', e:'eraser', r:'rect', o:'ellipse', l:'line', t:'text', w:'wand', k:'clone', p:'pen', m:'select'};
     const k = e.key.toLowerCase();
     if(map[k]){
       const btn = document.querySelector(`#toolbar button[data-tool="${map[k]}"]`);
