@@ -133,7 +133,7 @@
   <button id="btnNew" title="New blank document (opens a new tab)">New</button>
   <button id="btnOpen" title="First image starts a new canvas; if a canvas is already open, images add as layers on top of it">Open Image</button>
   <button id="btnImportLayer" title="Add an image as a new layer on top of the CURRENT canvas">+ Add Layer From File</button>
-  <button id="btnSaveProj" title="Save this document (.mpe.json)">Save Project</button>
+  <button id="btnSaveProj" title="Save this document (.json) — lets you pick the folder in Chrome/Edge">Save Project</button>
   <button id="btnLoadProj" title="Load a saved document as a new tab">Load Project</button>
   <div class="sep"></div>
   <button id="btnUndo" title="Undo (Ctrl+Z)">Undo</button>
@@ -145,8 +145,8 @@
   <button id="btnZoomFit" title="Fit to window (Ctrl+0)">Fit</button>
   <span class="small" style="margin-left:6px;">Ctrl+scroll to zoom &middot; Space+drag to pan</span>
   <div class="spacer"></div>
-  <button id="btnExportPng">Export PNG</button>
-  <button id="btnExportJpg">Export JPEG</button>
+  <button id="btnExportPng" title="Lets you pick the folder in Chrome/Edge; downloads normally elsewhere">Export PNG</button>
+  <button id="btnExportJpg" title="Lets you pick the folder in Chrome/Edge; downloads normally elsewhere">Export JPEG</button>
   <input type="file" id="fileInput" accept="image/*" multiple>
   <input type="file" id="importInput" accept="image/*" multiple>
   <input type="file" id="projInput" accept="application/json,.json">
@@ -1739,14 +1739,38 @@ window.addEventListener('keydown', (e)=>{
 });
 
 // ---------- Export ----------
+// Saves a Blob to a location the user picks (Chrome/Edge, via the File System Access API),
+// falling back to a normal browser download (into the default Downloads folder) elsewhere.
+async function saveBlob(blob, suggestedName, mimeType, description, extensions){
+  if(window.showSaveFilePicker){
+    try{
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description, accept: { [mimeType]: extensions } }]
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch(err){
+      if(err && err.name==='AbortError') return; // user cancelled the dialog — don't also auto-download
+      console.error(err);
+      // fall through to the classic download as a fallback for unexpected errors
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = suggestedName; a.click();
+  URL.revokeObjectURL(url);
+}
 function exportImage(type){
   if(!doc) return;
   render();
   const mime = type==='jpg' ? 'image/jpeg' : 'image/png';
-  const url = stage.toDataURL(mime, 0.92);
-  const a = document.createElement('a');
-  a.href = url; a.download = (doc.name||'photo-edit')+'.'+(type==='jpg'?'jpg':'png');
-  a.click();
+  const ext = type==='jpg' ? '.jpg' : '.png';
+  stage.toBlob((blob)=>{
+    saveBlob(blob, (doc.name||'photo-edit')+ext, mime, type==='jpg'?'JPEG Image':'PNG Image', [ext]);
+  }, mime, 0.92);
 }
 document.getElementById('btnExportPng').onclick = ()=> exportImage('png');
 document.getElementById('btnExportJpg').onclick = ()=> exportImage('jpg');
@@ -1756,10 +1780,7 @@ document.getElementById('btnSaveProj').onclick = ()=>{
   if(!doc) return;
   const snap = serializeDoc();
   const blob = new Blob([JSON.stringify(snap)], {type:'application/json'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = (doc.name||'project')+'.mpe.json'; a.click();
-  URL.revokeObjectURL(url);
+  saveBlob(blob, (doc.name||'project')+'.mpe.json', 'application/json', 'Photo Editor Project', ['.json']);
 };
 document.getElementById('btnLoadProj').onclick = ()=> document.getElementById('projInput').click();
 document.getElementById('projInput').onchange = (e)=>{
