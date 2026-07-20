@@ -187,6 +187,7 @@
       <canvas id="stage"></canvas>
       <div id="cropOverlay"><div id="cropRect"></div></div>
       <div id="penOverlay" style="position:absolute; inset:0; pointer-events:none; display:none;"></div>
+      <div id="transformOverlay" style="position:absolute; inset:0; pointer-events:none; display:none;"></div>
     </div>
   </div>
 
@@ -245,6 +246,23 @@
 
     <div class="section" id="transformSection">
       <h3>Transform (active layer)</h3>
+      <div class="row" style="margin-bottom:6px; gap:6px;">
+        <label class="field" style="flex:1;">X
+          <input type="number" id="layerX" step="1">
+        </label>
+        <label class="field" style="flex:1;">Y
+          <input type="number" id="layerY" step="1">
+        </label>
+      </div>
+      <div class="row" style="margin-bottom:6px; gap:6px;">
+        <label class="field" style="flex:1;">Width
+          <input type="number" id="layerW" step="1" min="1">
+        </label>
+        <label class="field" style="flex:1;">Height
+          <input type="number" id="layerH" step="1" min="1">
+        </label>
+      </div>
+      <label class="small row" style="margin-bottom:6px;"><input type="checkbox" id="layerLockAspect"> Lock aspect ratio</label>
       <div class="row" style="margin-bottom:6px;">
         <button id="btnFlipH" style="flex:1;">Flip H</button>
         <button id="btnFlipV" style="flex:1;">Flip V</button>
@@ -738,6 +756,18 @@ function refreshPanels(){
   document.getElementById('layerRotation').value = l? (l.rotation||0) : 0;
   document.getElementById('rotVal').textContent = (l?(l.rotation||0):0)+'°';
 
+  document.getElementById('layerX').value = l? Math.round(l.x) : 0;
+  document.getElementById('layerY').value = l? Math.round(l.y) : 0;
+  document.getElementById('layerW').value = l && l.type!=='text' ? Math.round(l.w) : '';
+  document.getElementById('layerH').value = l && l.type!=='text' ? Math.round(l.h) : '';
+  const noSize = !l || l.type==='text';
+  document.getElementById('layerW').disabled = noSize;
+  document.getElementById('layerH').disabled = noSize;
+  document.getElementById('layerLockAspect').disabled = noSize;
+  document.getElementById('layerX').disabled = !l;
+  document.getElementById('layerY').disabled = !l;
+  updateTransformOverlay();
+
   const a = l? l.adj : defaultAdj();
   setRangeVal('adjBrightness','valBrightness',a.brightness,'%');
   setRangeVal('adjContrast','valContrast',a.contrast,'%');
@@ -777,6 +807,7 @@ document.querySelectorAll('#toolbar button').forEach(btn=>{
     document.getElementById('penBar').classList.toggle('hidden', tool!=='pen');
     cropOverlay.style.display = tool==='crop' ? 'block' : 'none';
     drawPenOverlay();
+    updateTransformOverlay();
     updateStatus();
   };
 });
@@ -793,6 +824,7 @@ function applyZoom(){
   stageWrap.style.height = (doc.height*z)+'px';
   document.getElementById('zoomLabel').textContent = Math.round(z*100)+'%';
   drawPenOverlay();
+  updateTransformOverlay();
 }
 function fitZoom(){
   if(!doc) return;
@@ -994,6 +1026,91 @@ document.getElementById('layerRotation').onpointerdown = ()=>{ if(doc) saveHisto
 document.getElementById('layerRotation').oninput = (e)=>{
   const l=activeLayer(); if(l){ l.rotation=+e.target.value; document.getElementById('rotVal').textContent=l.rotation+'°'; render(); }
 };
+
+// ---------- Numeric X/Y/W/H fields (per-layer resize & reposition) ----------
+let xywhHistorySaved = false;
+function xywhStart(){ if(doc && !xywhHistorySaved){ saveHistory(); xywhHistorySaved = true; } }
+function xywhEnd(){ xywhHistorySaved = false; }
+document.getElementById('layerX').addEventListener('focus', xywhStart);
+document.getElementById('layerX').addEventListener('input', (e)=>{
+  const l=activeLayer(); if(!l) return; l.x = +e.target.value || 0; render(); updateTransformOverlay();
+});
+document.getElementById('layerX').addEventListener('blur', xywhEnd);
+document.getElementById('layerY').addEventListener('focus', xywhStart);
+document.getElementById('layerY').addEventListener('input', (e)=>{
+  const l=activeLayer(); if(!l) return; l.y = +e.target.value || 0; render(); updateTransformOverlay();
+});
+document.getElementById('layerY').addEventListener('blur', xywhEnd);
+document.getElementById('layerW').addEventListener('focus', xywhStart);
+document.getElementById('layerW').addEventListener('input', (e)=>{
+  const l=activeLayer(); if(!l||l.type==='text') return;
+  const newW = Math.max(1, +e.target.value || 1);
+  if(document.getElementById('layerLockAspect').checked && l.w>0){
+    const ratio = l.h/l.w; l.h = Math.max(1, Math.round(newW*ratio));
+    document.getElementById('layerH').value = Math.round(l.h);
+  }
+  l.w = newW; render(); updateTransformOverlay();
+});
+document.getElementById('layerW').addEventListener('blur', xywhEnd);
+document.getElementById('layerH').addEventListener('focus', xywhStart);
+document.getElementById('layerH').addEventListener('input', (e)=>{
+  const l=activeLayer(); if(!l||l.type==='text') return;
+  const newH = Math.max(1, +e.target.value || 1);
+  if(document.getElementById('layerLockAspect').checked && l.h>0){
+    const ratio = l.w/l.h; l.w = Math.max(1, Math.round(newH*ratio));
+    document.getElementById('layerW').value = Math.round(l.w);
+  }
+  l.h = newH; render(); updateTransformOverlay();
+});
+document.getElementById('layerH').addEventListener('blur', xywhEnd);
+
+// ---------- Interactive corner-drag resize handles (Move tool) ----------
+let xformDrag = null; // {corner, startDocX, startDocY, origX, origY, origW, origH}
+function updateTransformOverlay(){
+  const ov = document.getElementById('transformOverlay');
+  const l = activeLayer();
+  if(!doc || tool!=='move' || !l || l.type==='text'){ ov.style.display='none'; ov.innerHTML=''; return; }
+  ov.style.display='block';
+  const z = doc.zoom;
+  const x0=l.x*z, y0=l.y*z, x1=(l.x+l.w)*z, y1=(l.y+l.h)*z;
+  const hs = 10;
+  const corners = [
+    {id:'nw', x:x0, y:y0, cursor:'nwse-resize'}, {id:'ne', x:x1, y:y0, cursor:'nesw-resize'},
+    {id:'sw', x:x0, y:y1, cursor:'nesw-resize'}, {id:'se', x:x1, y:y1, cursor:'nwse-resize'}
+  ];
+  ov.innerHTML = `<div style="position:absolute; left:${x0}px; top:${y0}px; width:${x1-x0}px; height:${y1-y0}px; border:1px dashed #4f8cff; box-sizing:border-box;"></div>`
+    + corners.map(c=>`<div class="xformHandle" data-corner="${c.id}" style="position:absolute; left:${c.x-hs/2}px; top:${c.y-hs/2}px; width:${hs}px; height:${hs}px; background:#4f8cff; border:1px solid #fff; border-radius:2px; cursor:${c.cursor}; pointer-events:auto;"></div>`).join('');
+  ov.querySelectorAll('.xformHandle').forEach(h=>{
+    h.addEventListener('mousedown', (e)=>{
+      e.preventDefault(); e.stopPropagation();
+      const pt = canvasPointFromEvent(e);
+      const layer = activeLayer(); if(!layer) return;
+      saveHistory();
+      xformDrag = { corner: h.dataset.corner, startX: pt.x, startY: pt.y, origX: layer.x, origY: layer.y, origW: layer.w, origH: layer.h };
+    });
+  });
+}
+window.addEventListener('mousemove', (e)=>{
+  if(!xformDrag || !doc) return;
+  const l = activeLayer(); if(!l) return;
+  const pt = canvasPointFromEvent(e);
+  const dx = pt.x - xformDrag.startX, dy = pt.y - xformDrag.startY;
+  const MIN = 4;
+  let {origX:x, origY:y, origW:w, origH:h, corner} = xformDrag;
+  if(corner==='se'){ w = Math.max(MIN, xformDrag.origW+dx); h = Math.max(MIN, xformDrag.origH+dy); }
+  else if(corner==='nw'){ w = Math.max(MIN, xformDrag.origW-dx); h = Math.max(MIN, xformDrag.origH-dy); x = xformDrag.origX+xformDrag.origW-w; y = xformDrag.origY+xformDrag.origH-h; }
+  else if(corner==='ne'){ w = Math.max(MIN, xformDrag.origW+dx); h = Math.max(MIN, xformDrag.origH-dy); y = xformDrag.origY+xformDrag.origH-h; }
+  else if(corner==='sw'){ w = Math.max(MIN, xformDrag.origW-dx); h = Math.max(MIN, xformDrag.origH+dy); x = xformDrag.origX+xformDrag.origW-w; }
+  l.x=x; l.y=y; l.w=w; l.h=h;
+  render(); updateTransformOverlay();
+  document.getElementById('layerX').value = Math.round(x);
+  document.getElementById('layerY').value = Math.round(y);
+  document.getElementById('layerW').value = Math.round(w);
+  document.getElementById('layerH').value = Math.round(h);
+});
+window.addEventListener('mouseup', ()=>{
+  if(xformDrag){ xformDrag=null; refreshLayerList(); }
+});
 function flipCanvas(src, horizontal){
   const w=src.width, h=src.height;
   const c = makeCanvas(w,h); const cc=c.getContext('2d');
@@ -1424,6 +1541,9 @@ function doMove(pt){
   l.x = moveLayerOrig.x + (pt.x-moveStart.x);
   l.y = moveLayerOrig.y + (pt.y-moveStart.y);
   render();
+  updateTransformOverlay();
+  document.getElementById('layerX').value = Math.round(l.x);
+  document.getElementById('layerY').value = Math.round(l.y);
 }
 function pickLayerAt(pt){
   for(let i=doc.layers.length-1;i>=0;i--){
