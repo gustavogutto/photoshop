@@ -325,6 +325,9 @@
       <div class="row" style="margin-top:8px;">
         <button id="btnAiRemove" style="flex:1;" title="Downloads a small AI model the first time — needs internet once">AI Remove BG (needs internet)</button>
       </div>
+      <div class="row" style="margin-top:6px;">
+        <button id="btnSelectSubject" style="flex:1;" title="Same AI model as above, but writes the result into a layer mask instead of deleting pixels — non-destructive, undo-friendly">Select Subject → Mask (needs internet)</button>
+      </div>
     </div>
 
   </div>
@@ -1452,6 +1455,49 @@ document.getElementById('btnAiRemove').onclick = async ()=>{
     console.error(err);
     alert('AI background removal needs an internet connection the first time (it downloads a small model). '+
       'It failed to load — you can still use the offline "Magic Erase" tool above.');
+    btn.textContent = orig; btn.disabled = false;
+  }
+};
+
+// "Select Subject" — same model as AI Remove BG, but writes the cutout's alpha into a
+// layer MASK instead of deleting pixels, so it's non-destructive and easy to touch up.
+document.getElementById('btnSelectSubject').onclick = async ()=>{
+  const l = activeLayer();
+  if(!l || l.type==='text'){ alert('Select an image or draw layer first.'); return; }
+  const btn = document.getElementById('btnSelectSubject');
+  const orig = btn.textContent;
+  btn.textContent = 'Loading model…'; btn.disabled = true;
+  try{
+    const mod = await import('https://esm.sh/@imgly/background-removal@1.5.5?bundle');
+    const blob = await new Promise(res=> l.canvas.toBlob(res, 'image/png'));
+    const resultBlob = await mod.removeBackground(blob);
+    const url = URL.createObjectURL(resultBlob);
+    const img = await new Promise(res=>{ const im = new Image(); im.onload=()=>res(im); im.src=url; });
+    saveHistory();
+    // Key off the layer canvas's native pixel size (not l.w/l.h, which Resize Document
+    // can change independently of the underlying canvas) so this lines up with any
+    // pre-existing mask, which is always created at that same native size.
+    const nw = l.canvas.width, nh = l.canvas.height;
+    const tmp = makeCanvas(nw, nh);
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(img, 0, 0, nw, nh);
+    const cut = tctx.getImageData(0,0,nw,nh);
+    const mask = l.mask || makeFullMask(nw, nh);
+    const mctx = mask.getContext('2d');
+    const maskData = mctx.getImageData(0,0,nw,nh);
+    for(let i=0;i<cut.data.length;i+=4){
+      maskData.data[i]=255; maskData.data[i+1]=255; maskData.data[i+2]=255;
+      maskData.data[i+3] = cut.data[i+3];
+    }
+    mctx.putImageData(maskData,0,0);
+    l.mask = mask;
+    URL.revokeObjectURL(url);
+    render(); refreshLayerList(); refreshPanels();
+    btn.textContent = orig; btn.disabled = false;
+  } catch(err){
+    console.error(err);
+    alert('Select Subject needs an internet connection the first time (it downloads a small model). '+
+      'It failed to load.');
     btn.textContent = orig; btn.disabled = false;
   }
 };
