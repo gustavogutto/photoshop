@@ -123,8 +123,8 @@
 
 <div id="topbar">
   <button id="btnNew" title="New blank document (opens a new tab)">New</button>
-  <button id="btnOpen" title="Each selected image opens as its own new tab">Open Image</button>
-  <button id="btnImportLayer" title="Import an image as a new layer inside the CURRENT tab">Import Into Current</button>
+  <button id="btnOpen" title="First image starts a new canvas; if a canvas is already open, images add as layers on top of it">Open Image</button>
+  <button id="btnImportLayer" title="Add an image as a new layer on top of the CURRENT canvas">+ Add Layer From File</button>
   <button id="btnSaveProj" title="Save this document (.mpe.json)">Save Project</button>
   <button id="btnLoadProj" title="Load a saved document as a new tab">Load Project</button>
   <div class="sep"></div>
@@ -161,7 +161,7 @@
   </div>
 
   <div id="canvasArea">
-    <div id="dropHint">Open Image, or drag &amp; drop photos here to start editing — each photo opens as its own tab.<br>Everything runs locally in your browser — nothing is uploaded.<br><br>Copy a layer from one tab and paste it into another to combine photos.</div>
+    <div id="dropHint">Open Image, or drag &amp; drop a photo here to start editing.<br>Once a canvas is open, open or drop more photos to stack them as layers on the same screen.<br>Everything runs locally in your browser — nothing is uploaded.<br><br>Use "+ New" in the tab bar if you want a separate, unrelated document instead.</div>
     <div id="stageWrap" class="hidden">
       <div id="checker"></div>
       <canvas id="stage"></canvas>
@@ -760,13 +760,13 @@ window.addEventListener('mouseup', ()=>{
   if(panning){ panning=false; canvasArea.style.cursor = spaceHeld?'grab':''; }
 });
 
-// ---------- File open (each file -> new tab) / drop ----------
+// ---------- File open: first image starts the canvas, every image after that becomes a layer on it ----------
 document.getElementById('btnOpen').onclick = ()=> document.getElementById('fileInput').click();
-document.getElementById('fileInput').onchange = (e)=>{ openFilesAsTabs(e.target.files); e.target.value=''; };
+document.getElementById('fileInput').onchange = (e)=>{ handleIncomingImages(e.target.files); e.target.value=''; };
 ['dragover','dragenter'].forEach(ev=> canvasArea.addEventListener(ev, e=>{e.preventDefault();}));
 canvasArea.addEventListener('drop', e=>{
   e.preventDefault();
-  if(e.dataTransfer.files.length) openFilesAsTabs(e.dataTransfer.files);
+  if(e.dataTransfer.files.length) handleIncomingImages(e.dataTransfer.files);
 });
 function readImage(file){
   return new Promise((resolve)=>{
@@ -779,11 +779,16 @@ function readImage(file){
     reader.readAsDataURL(file);
   });
 }
-async function openFilesAsTabs(fileList){
+// If no document is open yet, the first image opens as the base canvas and any
+// further images in the same batch stack on top of it as layers. If a document
+// is already open, every incoming image lands as a new layer on it.
+async function handleIncomingImages(fileList){
   const files = Array.from(fileList).filter(f=>f.type.startsWith('image/'));
   for(const file of files){
     const img = await readImage(file);
-    createDocumentFromImage(img, file.name.replace(/\.[^.]+$/,''));
+    const name = file.name.replace(/\.[^.]+$/,'');
+    if(!doc) createDocumentFromImage(img, name);
+    else importImageAsLayer(img, name);
   }
 }
 
